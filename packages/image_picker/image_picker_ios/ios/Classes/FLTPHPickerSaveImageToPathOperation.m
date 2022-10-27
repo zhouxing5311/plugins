@@ -14,6 +14,7 @@ API_AVAILABLE(ios(14))
 @property(assign, nonatomic) NSNumber *maxWidth;
 @property(assign, nonatomic) NSNumber *desiredImageQuality;
 @property(assign, nonatomic) BOOL requestFullMetadata;
+@property(strong, nonatomic) PHAsset *directAsset;
 
 @end
 
@@ -30,14 +31,16 @@ typedef void (^GetSavedPath)(NSString *);
                       maxWidth:(NSNumber *)maxWidth
            desiredImageQuality:(NSNumber *)desiredImageQuality
                   fullMetadata:(BOOL)fullMetadata
+                   directAsset:(PHAsset *)directAsset
                 savedPathBlock:(GetSavedPath)savedPathBlock API_AVAILABLE(ios(14)) {
   if (self = [super init]) {
-    if (result) {
+    if (result || directAsset) {
       self.result = result;
       self.maxHeight = maxHeight;
       self.maxWidth = maxWidth;
       self.desiredImageQuality = desiredImageQuality;
       self.requestFullMetadata = fullMetadata;
+      self.directAsset = directAsset;
       getSavedPath = savedPathBlock;
       executing = NO;
       finished = NO;
@@ -88,6 +91,13 @@ typedef void (^GetSavedPath)(NSString *);
   if (@available(iOS 14, *)) {
     [self setExecuting:YES];
 
+    if (self.directAsset) {
+        [[PHImageManager defaultManager] requestImageDataForAsset:self.directAsset options:nil resultHandler:^(NSData * _Nullable imageData, NSString * _Nullable dataUTI, UIImageOrientation orientation, NSDictionary * _Nullable info) {
+            [self processImage:[UIImage imageWithData:imageData]];
+        }];
+        return;
+    }
+      
     if ([self.result.itemProvider hasItemConformingToTypeIdentifier:UTTypeWebP.identifier]) {
       [self.result.itemProvider
           loadDataRepresentationForTypeIdentifier:UTTypeWebP.identifier
@@ -119,8 +129,12 @@ typedef void (^GetSavedPath)(NSString *);
   PHAsset *originalAsset;
   // Only if requested, fetch the full "PHAsset" metadata, which requires  "Photo Library Usage"
   // permissions.
-  if (self.requestFullMetadata) {
-    originalAsset = [FLTImagePickerPhotoAssetUtil getAssetFromPHPickerResult:self.result];
+  if (self.requestFullMetadata && self.result) {
+      if (self.result) {
+          originalAsset = [FLTImagePickerPhotoAssetUtil getAssetFromPHPickerResult:self.result];
+      } else {
+          originalAsset = self.directAsset;
+      }
   }
 
   if (self.maxWidth != nil || self.maxHeight != nil) {

@@ -16,6 +16,7 @@
 #import "FLTImagePickerMetaDataUtil.h"
 #import "FLTImagePickerPhotoAssetUtil.h"
 #import "FLTPHPickerSaveImageToPathOperation.h"
+#import "FLTImageLimitSelectController.h"
 #import "messages.g.h"
 
 @implementation FLTImagePickerMethodCallContext
@@ -39,6 +40,7 @@
  * images.
  */
 @property(strong, nonatomic) PHPickerViewController *pickerViewController API_AVAILABLE(ios(14));
+@property(strong, nonatomic) FLTImageLimitSelectController *limitPhotoSelectController API_AVAILABLE(ios(14));
 
 /**
  * The UIImagePickerController instances that will be used when a new
@@ -107,23 +109,25 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   }
 }
 
-- (void)launchPHPickerWithContext:(nonnull FLTImagePickerMethodCallContext *)context
-    API_AVAILABLE(ios(14)) {
-  PHPickerConfiguration *config =
+- (void)launchPHPickerWithContext:(nonnull FLTImagePickerMethodCallContext *)context isMulitiSelect:(BOOL)isMulitiSelect API_AVAILABLE(ios(14)) {
+    PHPickerConfiguration *config =
       [[PHPickerConfiguration alloc] initWithPhotoLibrary:PHPhotoLibrary.sharedPhotoLibrary];
-  config.selectionLimit = context.maxImageCount;
-  config.filter = [PHPickerFilter imagesFilter];
+    config.selectionLimit = context.maxImageCount;
+    config.filter = [PHPickerFilter imagesFilter];
 
-  _pickerViewController = [[PHPickerViewController alloc] initWithConfiguration:config];
-  _pickerViewController.delegate = self;
-  _pickerViewController.presentationController.delegate = self;
-  self.callContext = context;
+    //全量图片选择
+    _pickerViewController = [[PHPickerViewController alloc] initWithConfiguration:config];
+    _pickerViewController.delegate = self;
+    _pickerViewController.presentationController.delegate = self;
+    
+    //部分图片选择
+    __weak typeof(self) weakSelf = self;
+    _limitPhotoSelectController = [[FLTImageLimitSelectController alloc] initWithIsMulitiSelect:isMulitiSelect selectedBlock:^(NSArray<PHAsset *> * _Nonnull assets) {
+        [weakSelf handleImagePickWithPickResults:nil assets:assets];
+    }];
 
-  if (context.requestFullMetadata) {
+    self.callContext = context;
     [self checkPhotoAuthorizationForAccessLevel];
-  } else {
-    [self showPhotoLibraryWithPHPicker:_pickerViewController];
-  }
 }
 
 - (void)launchUIImagePickerWithSource:(nonnull FLTSourceSpecification *)source
@@ -184,7 +188,7 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
 
   if (source.type == FLTSourceTypeGallery) {  // Capture is not possible with PHPicker
     if (@available(iOS 14, *)) {
-      [self launchPHPickerWithContext:context];
+      [self launchPHPickerWithContext:context isMulitiSelect:NO];
     } else {
       [self launchUIImagePickerWithSource:source context:context];
     }
@@ -205,7 +209,7 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   context.requestFullMetadata = [fullMetadata boolValue];
 
   if (@available(iOS 14, *)) {
-    [self launchPHPickerWithContext:context];
+    [self launchPHPickerWithContext:context isMulitiSelect:YES];
   } else {
     // Camera is ignored for gallery mode, so the value here is arbitrary.
     [self launchUIImagePickerWithSource:[FLTSourceSpecification makeWithType:FLTSourceTypeGallery
@@ -368,38 +372,36 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
 }
 
 - (void)checkPhotoAuthorizationForAccessLevel API_AVAILABLE(ios(14)) {
-  PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
-  switch (status) {
-    case PHAuthorizationStatusNotDetermined: {
-      [PHPhotoLibrary
-          requestAuthorizationForAccessLevel:PHAccessLevelReadWrite
-                                     handler:^(PHAuthorizationStatus status) {
-                                       dispatch_async(dispatch_get_main_queue(), ^{
-                                         if (status == PHAuthorizationStatusAuthorized) {
-                                           [self
-                                               showPhotoLibraryWithPHPicker:self->
-                                                                            _pickerViewController];
-                                         } else if (status == PHAuthorizationStatusLimited) {
-                                           [self
-                                               showPhotoLibraryWithPHPicker:self->
-                                                                            _pickerViewController];
-                                         } else {
-                                           [self errorNoPhotoAccess:status];
-                                         }
-                                       });
-                                     }];
-      break;
+    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
+    switch (status) {
+        case PHAuthorizationStatusNotDetermined: {
+            [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite
+                                                       handler:^(PHAuthorizationStatus status) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (status == PHAuthorizationStatusAuthorized) {
+                        [self showPhotoLibraryWithPHPicker:self->_pickerViewController];
+                    } else if (status == PHAuthorizationStatusLimited) {
+                        [self
+                            showLimitedPhotoLibraryWithPHPicker:self->_limitPhotoSelectController];
+                    } else {
+                        [self errorNoPhotoAccess:status];
+                    }
+                });
+            }];
+            break;
     }
     case PHAuthorizationStatusAuthorized:
+            [self showPhotoLibraryWithPHPicker:self->_pickerViewController];
+            break;
     case PHAuthorizationStatusLimited:
-      [self showPhotoLibraryWithPHPicker:_pickerViewController];
-      break;
+            [self showLimitedPhotoLibraryWithPHPicker:_limitPhotoSelectController];
+            break;
     case PHAuthorizationStatusDenied:
     case PHAuthorizationStatusRestricted:
     default:
-      [self errorNoPhotoAccess:status];
-      break;
-  }
+            [self errorNoPhotoAccess:status];
+            break;
+    }
 }
 
 - (void)errorNoCameraAccess:(AVAuthorizationStatus)status {
@@ -438,7 +440,16 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   }
 }
 
+//展示全部相册图片
 - (void)showPhotoLibraryWithPHPicker:(PHPickerViewController *)pickerViewController
+    API_AVAILABLE(ios(14)) {
+  [[self viewControllerWithWindow:nil] presentViewController:pickerViewController
+                                                    animated:YES
+                                                  completion:nil];
+}
+
+//展示受限相册图片
+- (void)showLimitedPhotoLibraryWithPHPicker:(FLTImageLimitSelectController *)pickerViewController
     API_AVAILABLE(ios(14)) {
   [[self viewControllerWithWindow:nil] presentViewController:pickerViewController
                                                     animated:YES
@@ -478,34 +489,49 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
     [self sendCallResultWithSavedPathList:nil];
     return;
   }
-  dispatch_queue_t backgroundQueue =
-      dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
-  dispatch_async(backgroundQueue, ^{
-    NSNumber *maxWidth = self.callContext.maxSize.width;
-    NSNumber *maxHeight = self.callContext.maxSize.height;
-    NSNumber *imageQuality = self.callContext.imageQuality;
-    NSNumber *desiredImageQuality = [self getDesiredImageQuality:imageQuality];
-    NSOperationQueue *operationQueue = [NSOperationQueue new];
-    NSMutableArray *pathList = [self createNSMutableArrayWithSize:results.count];
+    [self handleImagePickWithPickResults:results assets:nil];
+}
 
-    for (int i = 0; i < results.count; i++) {
-      PHPickerResult *result = results[i];
-      FLTPHPickerSaveImageToPathOperation *operation = [[FLTPHPickerSaveImageToPathOperation alloc]
-               initWithResult:result
-                    maxHeight:maxHeight
-                     maxWidth:maxWidth
-          desiredImageQuality:desiredImageQuality
-                 fullMetadata:self.callContext.requestFullMetadata
-               savedPathBlock:^(NSString *savedPath) {
-                 pathList[i] = savedPath;
-               }];
-      [operationQueue addOperation:operation];
-    }
-    [operationQueue waitUntilAllOperationsAreFinished];
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [self sendCallResultWithSavedPathList:pathList];
+//处理图片选择
+- (void)handleImagePickWithPickResults:(NSArray<PHPickerResult *> *)results
+                                assets:(NSArray<PHAsset *> *)assets API_AVAILABLE(ios(14)) {
+    dispatch_queue_t backgroundQueue =
+        dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_BACKGROUND, 0);
+    dispatch_async(backgroundQueue, ^{
+        NSNumber *maxWidth = self.callContext.maxSize.width;
+        NSNumber *maxHeight = self.callContext.maxSize.height;
+        NSNumber *imageQuality = self.callContext.imageQuality;
+        NSNumber *desiredImageQuality = [self getDesiredImageQuality:imageQuality];
+        NSOperationQueue *operationQueue = [NSOperationQueue new];
+
+        NSArray *dataArray = results;
+        BOOL useAsset = NO;
+        if (assets.count) {
+            useAsset = YES;
+            dataArray = assets;
+        }
+        
+        NSMutableArray *pathList = [self createNSMutableArrayWithSize:dataArray.count];
+        for (int i = 0; i < dataArray.count; i++) {
+            PHPickerResult *result = useAsset ? nil : dataArray[i];
+            PHAsset *currentAsset = useAsset ? dataArray[i] : nil;
+            FLTPHPickerSaveImageToPathOperation *operation = [[FLTPHPickerSaveImageToPathOperation alloc]
+                     initWithResult:result
+                          maxHeight:maxHeight
+                           maxWidth:maxWidth
+                desiredImageQuality:desiredImageQuality
+                       fullMetadata:self.callContext.requestFullMetadata
+                        directAsset:currentAsset
+                     savedPathBlock:^(NSString *savedPath) {
+                       pathList[i] = savedPath;
+                     }];
+            [operationQueue addOperation:operation];
+        }
+        [operationQueue waitUntilAllOperationsAreFinished];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self sendCallResultWithSavedPathList:pathList];
+        });
     });
-  });
 }
 
 #pragma mark -

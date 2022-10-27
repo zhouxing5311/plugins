@@ -103,6 +103,7 @@
                  maxWidth:@100
       desiredImageQuality:@100
              fullMetadata:fullMetadata
+              directAsset:nil
            savedPathBlock:^(NSString *savedPath) {
              if ([[NSFileManager defaultManager] fileExistsAtPath:savedPath]) {
                [pathExpectation fulfill];
